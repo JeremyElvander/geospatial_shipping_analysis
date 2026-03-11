@@ -6,6 +6,10 @@ import os
 import io
 import numpy as np
 import time
+import xarray as xr
+import rioxarray
+from scipy.ndimage import convolve
+from scipy import stats
 
 def retrieve_ice_concentration(start_year, stop_year, type='tif', step=1, crs=3995):
     
@@ -188,95 +192,91 @@ def retrieve_ais(bbox, start_year, stop_year, type='tif', step=1, width=5952, he
             print(f'Failed: {e}')
 
 
-# 
+def process_ice_raster(path):
+    maritime = 'data/ais_traffic/arctic_maritime'
+    with rasterio.open(f'{maritime}_{2012}.tif') as src:
+                ship_res = src.res 
+                bounds = src.bounds
+    ds = xr.open_dataset(path)
 
+    temp = ds['ice_conc'].isel(time=0)
+    temp['xc'] = temp['xc'] * 1000
+    temp['yc'] = temp['yc'] * 1000
+    temp = temp.rio.set_spatial_dims(x_dim='xc', y_dim='yc')
+    temp.rio.write_crs('EPSG:6931', inplace=True)
 
-# base = 'https://gmtds.maplarge.com/ogc/ais:density/wms'
-# html = requests.get(base, params={'SERVICE':'WMS', 'REQUEST':'GetCapabilities'})
+    temp_projected = temp.rio.reproject('EPSG:3995', resolution=ship_res)
+    temp_clipped = temp_projected.rio.clip_box(minx=bounds.left,
+                                                miny=bounds.bottom,
+                                                maxx=bounds.right,
+                                                maxy=bounds.top)
+    img_arr = temp_clipped.values.squeeze()
+    img_arr = np.where(img_arr <= 0, np.nan, img_arr)
+    return img_arr
 
-# from pprint import pprint
-# pprint(html.content)
+def spatial_autocorrelation(raster):
+    mask = ~np.isnan(raster)
+    n = np.sum(mask)
+    data = np.nan_to_num(raster, nan=0.0)
 
-# CALIBRATION = [
-#         # ('#cadeb9', 0),
-#         ('#c4d3a2', 0.05),
-#         ('#fef79a', 0.1),
-#         ('#fed375', 0.2),
-#         ('#f3a26f', 0.5),
-#         ('#fa7330', 2),
-#         ('#fb4e2b', 5),
-#         ('#d41a26', 10),
-#         ('#9c0026', 20),
-#         ('#61001f', 100)
-#     ]
-# def hex_to_rgb(hex):
-#     h = hex.strip('#')
-#     return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+    means = data[mask].mean()
+    std = data[mask].std()
+    z = (data - means)/std
 
-# # for tup in CALIBRATION:
-# #     print(f'{hex_to_rgb(tup[0])}')
+    z[~mask]=0
 
+    kernel = np.array([[1, 1, 1],
+                       [1, 0, 1],
+                       [1, 1, 1]])
 
-# import matplotlib.pyplot as plt
-# from mpl_toolkits.mplot3d import Axes3D
-# from matplotlib.colors import ListedColormap
+    #Spatial weights
+    kernel_norm = kernel/kernel.sum()
 
-# Define the points (x, y, z)
-# points = [(196, 211, 162), (254, 247, 154), (254, 211, 117), (243, 162, 111), 
-#           (250, 115, 48), (251, 78, 43), (212, 26, 38), (156, 0, 38), (97, 0, 31)]
+    #Calculate spatial lag
+    spatial_lag = convolve(z, kernel_norm, mode='constant', cval=0.0)
 
-# # Extract X, Y, Z coordinates
-# x = [p[0] for p in points]
-# y = [p[1] for p in points]
-# z = [p[2] for p in points]
+    #Use spatial lag to calculate local Moran's I
+    local_morans = z * spatial_lag
 
-# # Create 3D scatter plot
-# fig = plt.figure()
-# ax = fig.add_subplot(111, projection='3d')
-# ax.scatter(x, y, z, c=z, cmap=ListedColormap([tup[0] for tup in CALIBRATION]), s=50) # c=z colors by depth
+    #Global I: 
+    s2 = np.sum(z[mask]**2)
+    global_morans = np.sum(local_morans[mask])/ s2
 
-# # Set labels
-# ax.set_xlabel('X Label')
-# ax.set_ylabel('Y Label')
-# ax.set_zlabel('Z Label')
-# ax.plot(x, y, z, color='gray', linestyle='-', alpha=0.5)
-# plt.show()
+    #mask local morans for NAs:
+    local_morans = np.where(mask, local_morans, np.nan)
 
+    #Calculating p-values
+    w_i2 = np.sum(kernel_norm**2)
+    b2 = (n * np.sum(z[mask]**4)) / (s2**2)
+    local_variance = (w_i2 * (n - b2)) / (n - 1)
+    e_i = (w_i2 * (n-b2))/(n-1)
 
+    local_z = (local_morans - e_i) / np.sqrt(local_variance)
+    local_p = 2 * (1 - stats.norm.cdf(np.abs(local_z)))
 
+    local_p = np.where(mask, local_p, np.nan)
+    
+    clusters = lisa_clusters(z, spatial_lag)
 
-                    # img_array = np.array(png)
-                    # pixels = img_array.reshape(-1, 4)
-                    # # Keep only pixels where Alpha > 0 and it's not pure black
-                    # mask = (pixels[:, 3] > 0) & (np.sum(pixels[:, :3], axis=1) > 0)
-                    # active_pixels = pixels[mask]
+    return global_morans, local_morans, local_p, clusters
 
-                    # px_x = active_pixels[:, 0]
-                    # px_y = active_pixels[:, 1]
-                    # px_z = active_pixels[:, 2]
+def lisa_clusters(z, spatial_lag, p_values=None, alpha=0.01):
+    #Define empty array for hotspot, coldspot categories
+    # 0 (not significant, optional), 1: HH, 2: LL, 3: LH, 4: HL
+    lisa_clusters = np.zeros(z.shape, dtype=int)
 
-                    # import matplotlib.pyplot as plt
-                    # from mpl_toolkits.mplot3d import Axes3D
-                    # from matplotlib.colors import ListedColormap
+    #Define quadrants
+    hh = (z>0) & (spatial_lag > 0)
+    ll = (z < 0) & (spatial_lag < 0)
+    lh = (z < 0) & (spatial_lag > 0)
+    hl = (z > 0) & (spatial_lag < 0)
 
-                    # # Define the points (x, y, z)
-                    # points = [(196, 211, 162), (254, 247, 154), (254, 211, 117), (243, 162, 111), 
-                    #         (250, 115, 48), (251, 78, 43), (212, 26, 38), (156, 0, 38), (97, 0, 31)]
+    lisa_clusters[hh] = 1
+    lisa_clusters[ll] = 2
+    lisa_clusters[lh] = 3
+    lisa_clusters[hl] = 4
 
-                    # # Extract X, Y, Z coordinates
-                    # x = [p[0] for p in points]
-                    # y = [p[1] for p in points]
-                    # z = [p[2] for p in points]
-
-                    # # Create 3D scatter plot
-                    # fig = plt.figure()
-                    # ax = fig.add_subplot(111, projection='3d')
-                    # ax.scatter(px_x, px_y, px_z, c='black', s=1, alpha=0.2, label='Image Pixels')
-                    # ax.scatter(x, y, z, c=z, cmap=ListedColormap([tup[0] for tup in CALIBRATION]), s=50) # c=z colors by depth
-
-                    # # Set labels
-                    # ax.set_xlabel('X Label')
-                    # ax.set_ylabel('Y Label')
-                    # ax.set_zlabel('Z Label')
-                    # ax.plot(x, y, z, color='blue', linestyle='-', alpha=0.5)
-                    # plt.show()
+    if p_values is not None:
+        lisa_clusters[p_values > alpha] = 0
+    
+    return lisa_clusters

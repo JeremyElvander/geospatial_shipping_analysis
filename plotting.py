@@ -1,6 +1,6 @@
 #Helper file to reduce clutter in main ipynb
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm, LinearSegmentedColormap
+from matplotlib.colors import LogNorm, LinearSegmentedColormap, ListedColormap
 import matplotlib.patches as mpatches
 from matplotlib.animation import FuncAnimation
 import pandas as pd
@@ -15,6 +15,54 @@ import cartopy.feature as cfeature
 from cartopy.io import img_tiles
 import xarray as xr
 import rioxarray
+
+def static_plot(shipping_raster=None, ice_raster = None, shipping=False, ice=False):
+    with rio.open('data/ais_traffic/arctic_maritime_2020.tif') as src:
+        bounds = src.bounds
+
+    proj = ccrs.NorthPolarStereo(central_longitude=0, true_scale_latitude=71)
+    extent = [bounds.left, bounds.right, bounds.bottom, bounds.top]
+    norm = LogNorm(vmin=0.0001, vmax=2000)
+
+    fig, ax = plt.subplots(figsize=(12, 10), subplot_kw={'projection': proj})
+    ax.set_xlim(bounds.left, bounds.right)
+    ax.set_ylim(bounds.bottom, bounds.top)
+
+
+    ax.add_feature(cfeature.OCEAN.with_scale('50m'), facecolor="#717171", edgecolor='none', zorder=0)
+    ax.add_feature(cfeature.LAND.with_scale('50m'), facecolor='#0e0e0e', edgecolor='none', zorder=1)
+    ax.add_feature(cfeature.COASTLINE.with_scale('50m'), edgecolor='#333333', linewidth=0.5, zorder=2)
+    ax.add_feature(cfeature.BORDERS.with_scale('50m'), edgecolor='#333333', linewidth=0.3, zorder=2)
+
+    if ice:
+        im_ice = ax.imshow(ice_raster, cmap='Blues_r', extent=extent, norm=plt.Normalize(vmin=0,vmax=100), zorder=3)
+        #Ice cbar
+        if shipping:
+            fig.canvas.draw()
+            ax.set_position([0.02, 0.02, 0.84, 0.96]) 
+
+            ice_cbar_ax = fig.add_axes([0.87, 0.52, 0.025, 0.40])
+            ice_cbar = fig.colorbar(im_ice, cax=ice_cbar_ax)
+        else:
+            ice_cbar = fig.colorbar(im_ice, ax=ax, shrink=0.7)
+        ice_cbar.set_label('Ice Concentration (%)', fontsize=12)
+
+    if shipping:
+        norm = LogNorm(vmin=0.0001, vmax=2000)
+        im_shipping = ax.imshow(shipping_raster, cmap='Reds_r', extent=extent, norm=norm, zorder=3)
+
+        #Shipping cbar
+        cbar_ticks = [0.001, 0.05, 1, 2, 5, 10, 20, 100, 2000]
+        if ice:
+            cbar_ax = fig.add_axes([0.87, 0.08, 0.025, 0.40])
+            cbar = plt.colorbar(im_shipping, cax=cbar_ax, ticks=cbar_ticks, shrink=0.7)
+        else:
+            cbar = plt.colorbar(im_shipping, ax=ax, ticks=cbar_ticks, shrink=0.7)
+        cbar.ax.set_yticklabels([str(i) for i in cbar_ticks])
+        cbar.set_label('AIS Density', fontsize=12)
+    
+    return fig, ax
+
 
 
 def dynamic_plot(years, bounds, interval, shipping=True, ice=False, save=False, filename='series.gif'):
@@ -127,3 +175,40 @@ def dynamic_plot(years, bounds, interval, shipping=True, ice=False, save=False, 
         anim.save(f'figures/{filename}', writer='pillow')
 
     return anim
+
+
+def plot_lisa_clusters(clusters, title= 'LISA Clusters'):
+    lisa_colors = ['#eeeeee', '#d7191c', '#2c7bb6', '#abd9e9', '#fdae61']
+    cmap = ListedColormap(lisa_colors)
+
+    with rio.open('data/ais_traffic/arctic_maritime_2020.tif') as src:
+        bounds = src.bounds
+
+    proj = ccrs.NorthPolarStereo(central_longitude=0, true_scale_latitude=71)
+    extent = [bounds.left, bounds.right, bounds.bottom, bounds.top]
+    norm = LogNorm(vmin=0.0001, vmax=2000)
+
+    fig, ax = plt.subplots(figsize=(12, 12), subplot_kw={'projection': proj})
+    ax.set_xlim(bounds.left, bounds.right)
+    ax.set_ylim(bounds.bottom, bounds.top)
+
+
+    ax.add_feature(cfeature.OCEAN.with_scale('50m'), facecolor="#717171", edgecolor='none', zorder=0)
+    ax.add_feature(cfeature.LAND.with_scale('50m'), facecolor='#0e0e0e', edgecolor='none', zorder=1)
+    ax.add_feature(cfeature.COASTLINE.with_scale('50m'), edgecolor='#333333', linewidth=0.5, zorder=2)
+    ax.add_feature(cfeature.BORDERS.with_scale('50m'), edgecolor='#333333', linewidth=0.3, zorder=2)
+
+    im = ax.imshow(clusters, extent=extent, cmap=cmap, interpolation='nearest')
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='#eeeeee', label='Not Significant'),
+        Patch(facecolor='#d7191c', label='High-High (Hot Spot)'),
+        Patch(facecolor='#2c7bb6', label='Low-Low (Cold Spot)'),
+        Patch(facecolor='#abd9e9', label='Low-High (Outlier)'),
+        Patch(facecolor='#fdae61', label='High-Low (Outlier)')
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.3, 1))
+    
+    ax.set_title(title)
+    plt.show()
